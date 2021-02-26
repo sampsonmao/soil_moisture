@@ -1,0 +1,467 @@
+---
+title: "STAT 226 Homework 4"
+author: "Sampson Mao"
+date: ''
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r, message=F}
+library(rgdal); library(sp); library(maps); library(maptools); library(dplyr)
+source("lonlat_smap_data_script.R")
+# mydata contains the data
+names(mydata) = c("longitude", "latitude", "aug6",
+                  "aug7", "aug8", "aug9",
+                  "aug10", "aug11", "aug12")
+# The following code to convert coordinates to state names is from 
+# https://stackoverflow.com/questions/8751497/latitude-longitude-coordinates-to-state-code-in-r
+lonlat_to_state_sp <- function(pointsDF) {
+    # Prepare SpatialPolygons object with one SpatialPolygon
+    # per state (plus DC, minus HI & AK)
+    states <- map('state', fill=TRUE, col="transparent", plot=FALSE)
+    IDs <- sapply(strsplit(states$names, ":"), function(x) x[1])
+    states_sp <- map2SpatialPolygons(states, IDs=IDs,
+                     proj4string=CRS("+proj=longlat +datum=WGS84"))
+    # Convert pointsDF to a SpatialPoints object 
+    pointsSP <- SpatialPoints(pointsDF, 
+                    proj4string=CRS("+proj=longlat +datum=WGS84"))
+    # Use 'over' to get _indices_ of the Polygons object containing each point 
+        indices <- over(pointsSP, states_sp)
+    # Return the state names of the Polygons object containing each point
+    stateNames <- sapply(states_sp@polygons, function(x) x@ID)
+    stateNames[indices]
+}
+```
+
+```{r, message=F}
+mydata$state = lonlat_to_state_sp(mydata[,1:2])
+dak.min = mydata %>%
+  dplyr::select(longitude, latitude, state, aug6, aug7, aug8) %>%
+  filter(state %in% c("north dakota", "south dakota", "minnesota"))
+```
+
+```{r usmap_plot,fig.align='center', fig.height=10, fig.width=5.5, message=F, echo=F, warning=F}
+library(usmap)
+library(ggplot2)
+library(reshape2)
+
+transformed_data = usmap_transform(dak.min)
+melted = melt(
+  transformed_data,
+  id.vars = c("longitude", "latitude", "state", "longitude.1", "latitude.1"),
+  variable.name = "date"
+)
+
+plot_usmap(include = c("ND", "SD", "MN")) +
+  geom_point(
+    data = melted
+    %>% dplyr::select(-date),
+    aes(x = longitude.1, y = latitude.1, size = value),
+    alpha = 0.1,
+    color = "grey"
+  ) +
+  geom_point(
+    data = melted,
+    aes(
+      x = longitude.1,
+      y = latitude.1,
+      color = value,
+      size = value
+    ),
+    shape = 16,
+    alpha = 0.6
+  ) +
+  facet_grid(rows= vars(date)) +
+  labs(size = "Soil moisture (%)", color= "Soil moisture (%)") +
+  scale_color_gradient(guide = guide_legend(),low = 'greenyellow', high = 'forestgreen') +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 12),
+    strip.background = element_blank(),
+    strip.text.y.right = element_text(angle = 0, size=12)
+  )
+ggsave("birdseye.pdf", width=5.5, height=10, dpi=600)
+```
+
+```{r balloons,fig.align='center', echo=F}
+library(scatterplot3d)
+logit = function(x) log(x/(1-x))
+
+soil = melted[complete.cases(melted),] 
+x = soil$longitude.1
+y = soil$latitude.1
+z = logit(soil$value)
+borders = us_map(include = c("ND", "SD", "MN"))
+# https://stackoverflow.com/questions/9946630/colour-points-in-a-plot-differently-depending-on-a-vector-of-values
+rbPal <- colorRampPalette(c('black','red'))
+z.col = rbPal(10)[as.numeric(cut(z,breaks = 10))]
+par(mar=c(1,2,0,1))
+pdf("balloonslogit.pdf", width=7, height=7)
+s = scatterplot3d(borders$x, borders$y, rep(0,length(borders$x))-3, 
+                  type="l", box=F, axis=T, grid=F,
+                  zlim=c(-3,3), color=4, angle=65,
+                  x.ticklabs="", y.ticklabs="",
+                  xlab="", ylab="", zlab="logit(Moisture)")
+s$points3d(x,y,z, type="h", pch=16, col=z.col)
+title("Soil Moisture in the Dakota-Minnesota region", line=-1)
+#title("Soil Moisture in the Dakota-Minnesota region", line=-1)
+dev.off()
+```
+
+```{r boxcox,fig.align='center', echo=F, message=F, warning=F}
+library(geoR)
+# Raw data
+soil_raw = soil[,c(1,2,7)]
+
+# Jittering replicates
+soil_jitter = data.frame(jitterDupCoords(soil[,1:2], max=1e-7), value=soil$value)
+
+# Lists for geoR
+in_geor = list(coords=soil_raw[,1:2], data=logit(soil_raw$value))
+in_geor_jitter = list(coords=soil_jitter[,1:2], data=logit(soil_jitter$value))
+
+# Creating design matrix D
+Y = soil_jitter$value
+n = length(Y)
+lon = soil_jitter$longitude
+lat = soil_jitter$latitude
+D = cbind(rep(1,n), lon, lat, lon^2, lat^2, lon*lat)
+colnames(D) = c("Intercept", "lon", "lat", "lon^2", "lat^2", "lon:lat")
+```
+
+```{r empirical_variograms,fig.align='center', message=F, fig.height=9, fig.width=5, echo=F}
+par(pty="s", mfrow=c(2,2))
+
+vgm.notrend = variog(in_geor, lambda=1, trend="2nd", messages=F)
+vgm4.notrend = variog4(in_geor_jitter, lambda=1, trend="2nd", messages=F)
+
+par(mfrow = c(1, 2))
+
+plot(vgm.notrend, col="blue", pch=4, main="Empirical variogram")
+lines(vgm.notrend, col="blue", pch=4)
+plot(vgm4.notrend, omni=T)
+title("Directional variogram ")
+title(xlab="Distance", ylab="Semivariance", outer=T)
+```
+
+```{r variogram_LSE,fig.align='center', fig.height=9, fig.width=9, echo=F}
+vgm = variog(in_geor, lambda=1, trend="2nd", nugget.tolerance = 0, messages=F)
+
+init.pars = c(0.15, 2)
+
+fit0.5 = variofit(vgm, kappa=0.5, cov.model="matern", ini.cov.pars = init.pars, 
+                  limits=c(0,10), messages=F)
+fit1 = variofit(vgm, kappa=1, cov.model="matern", ini.cov.pars = init.pars, 
+                limits=c(0,10), messages=F)
+fit1.5 = variofit(vgm, kappa=1.5, cov.model="matern", ini.cov.pars = init.pars, 
+                  limits=c(0,10), messages=F)
+fit2.5 = variofit(vgm, kappa=2.5, cov.model="matern", ini.cov.pars = init.pars, 
+                  limits=c(0,10), messages=F)
+
+par(mfrow = c(2, 2), pty="s",
+    oma = c(5, 4, 2, 0) + 0.1,
+    mar = c(1, 1, 1, 1) + 0.1)
+plot(vgm.notrend, pch=16, main=bquote(nu==0.5), xlab="", ylab="", xaxt='n')
+lines(fit0.5, col="blue", lty=4)
+abline(v=fit0.5$practicalRange, lty=3)
+abline(h=fit0.5$cov.pars[1]+fit0.5$nugget, lty=2)
+arrows(0,0,0, fit0.5$nugget, angle=20, length=0.1, lwd=2, col="cyan")
+arrows(0,0,fit0.5$cov.pars[2], 0, angle=20, length=0.1, lwd=2, col="brown")
+text(7,0, labels=bquote("SSE="~.(round(fit0.5$value, 2))))
+
+plot(vgm.notrend, pch=16, main=bquote(nu==1.0), xlab="", ylab="", xaxt='n', yaxt='n')
+lines(fit1, col="orange", lty=4)
+abline(v=fit1$practicalRange, lty=3)
+abline(h=fit1$cov.pars[1]+fit1$nugget, lty=2)
+arrows(0,0,0, fit1$nugget, angle=20, length=0.1, lwd=2, col="cyan")
+arrows(0,0,fit1$cov.pars[2], 0, angle=20, length=0.1, lwd=2, col="brown")
+text(7,0, labels=bquote("SSE="~.(round(fit1$value, 2))))
+
+plot(vgm.notrend, pch=16, main=bquote(nu==1.5), xlab="", ylab="")
+lines(fit1.5, col="red", lty=4)
+abline(v=fit1.5$practicalRange, lty=3)
+abline(h=fit1.5$cov.pars[1]+fit1.5$nugget, lty=2)
+arrows(0,0,0,fit1.5$nugget, angle=20, length=0.1, lwd=2, col="cyan")
+arrows(0,0,fit1.5$cov.pars[2], 0, angle=20, length=0.1, lwd=2, col="brown")
+text(7,0, labels=bquote("SSE="~.(round(fit1.5$value, 2))))
+
+plot(vgm.notrend, pch=16, main=bquote(nu==2.5), xlab="", ylab="", yaxt='n')
+lines(fit2.5, col="green", lty=4)
+abline(v=fit2.5$practicalRange, lty=3)
+abline(h=fit2.5$cov.pars[1]+fit2.5$nugget, lty=2)
+arrows(0,0,0,fit2.5$nugget, angle=20, length=0.1, lwd=2, col="cyan")
+arrows(0,0,fit2.5$cov.pars[2], 0, angle=20, length=0.1, lwd=2, col="brown")
+text(7,0, labels=bquote("SSE="~.(round(fit2.5$value, 2))))
+title(main="Least square fits with increasing smoothness", 
+      xlab="Distance",
+      ylab="Semivariance",
+      outer=T)
+legend("bottomright", legend=c("Sill", "Range", "Nugget", "Pract. Rnge", "Fit", "Empirical"),
+       col=c("black", "brown", "cyan", "black", "black", "black"), lty=c(2,1,1,3,4,NA),
+       pch=c(NA,NA,NA,NA,NA,16), lwd=c(1,2,2,1,1), bty="n")
+```
+
+```{r}
+library(mvtnorm)
+  
+n = dim(D)[1]
+k = dim(D)[2]
+
+# Hyperparameters for sigma^2
+# Chosen so mean ~ 0.3
+a = 11
+b = 0.3
+
+# Hyperparameters for theta
+alph = 2
+bet = 0.5
+
+# Hyperparameters for phi
+ss = 2
+u = 0
+
+thetaphi.post = function(t, p) {
+  theta = 1/(1+exp(-t))
+  phi = exp(p)
+  # theta = sigma^2/(tau^2 + sigma^2)
+  I = diag(n)
+  rho.mat = varcov.spatial(in_geor_jitter$coords, cov.pars=c(1, phi), nugget=0, kappa=0.5)
+  rho = rho.mat$varcov
+  V = theta*rho + (1-theta)*I
+
+  # Z = L^-1 Y
+  # F = L^-1 D
+  L = t(chol(V))
+  # L.inv = forwardsolve(L, I)
+  Z = forwardsolve(L, logit(Y))
+  FF = forwardsolve(L, D)
+  DVD = t(FF) %*% FF
+  
+  # R_1 beta.hat = (Q^T Y)_1
+  # S^2 = ||(Q^TY)_2||
+  QR = qr(FF)
+  Q = qr.Q(QR, complete=T)
+  R = qr.R(QR, complete=T)
+  
+  QZ = t(Q) %*% Z
+  
+  R1 = R[1:k,]
+  QZ1 = QZ[1:k,]
+  QZ2 = QZ[(k+1):n,]
+  
+  beta.hat = backsolve(R1, QZ1)
+  #beta.hat = solve(t(D) %*% solve(V) %*%D, t(D) %*% solve(V) %*% log(Y))
+  S2 = t(QZ2) %*% QZ2
+
+  # Find inverse of (D V^-1 D)^-1 for beta covariance
+  # F^-1 = R^-1 Q^T
+  F.inv = backsolve(R, t(Q))
+  DVD.inv = F.inv %*% t(F.inv)
+  
+  # Determinants
+  E = t(chol(DVD))
+  logdet.V = 2*sum(log(diag(L)))
+  logdet.DVD = 2*sum(log(diag(E)))
+  
+  # Priors
+  # Beta for theta
+  theta.prior = (alph-1)*log(theta) + (bet-1)*log(1-theta)
+  # Lognormal for phi
+  phi.prior = -log(phi) -0.5*log(ss) - (log(phi)-u)^2/(2*ss)
+
+  logdensity = - 0.5*logdet.V - 0.5*logdet.DVD - ((n-k)/2 + a)*log(S2 + 2*b) + theta.prior + phi.prior + (-t + 2*log(exp(-t)+1)) + p
+  
+  out = list(logdensity=logdensity, beta.hat=beta.hat, S2=S2, DVD.inv=DVD.inv)
+  return(out)
+}
+```
+
+```{r}
+set.seed(100)
+n.iter = 1099
+beta.mcmc = matrix(c( -102, -0.392, 3.58, 0.00141, -0.0212, 0.0158), ncol=6, nrow=n.iter+1, byrow=T)
+sigma.mcmc = rep(0.3, n.iter+1)
+
+#Starting points below are in the transformed scale
+phi.mcmc = rep(0, n.iter+1)
+theta.mcmc = rep(2, n.iter+1)
+sigma.tune = .5
+sigma.matrix = matrix(c(0.1316893,0.1,0.1,0.2091652), ncol=2, nrow=2)
+accepted = 0
+for (i in 1:n.iter) {
+  prop = rmvnorm(1, c(theta.mcmc[i],phi.mcmc[i]), sigma=sigma.tune*sigma.matrix)
+  theta.prop = prop[1]
+  phi.prop = prop[2]
+  
+  pi.p = thetaphi.post(theta.prop, phi.prop)
+  pi.c = thetaphi.post(theta.mcmc[i], phi.mcmc[i])
+  
+  log.ratio = pi.p$logdensity - pi.c$logdensity
+    
+  if (log(runif(1)) < log.ratio) {
+    accepted = accepted + 1
+    phi.mcmc[i+1] = phi.prop
+    theta.mcmc[i+1] = theta.prop
+    sigma.mcmc[i+1] = 1/rgamma(1, (n+k)/2+a, (pi.p$S2 + 2*b)/2)
+    beta.mcmc[i+1,] = rmvnorm(1, pi.p$beta.hat, sigma.mcmc[i+1]*pi.p$DVD.inv)
+    } else {
+    phi.mcmc[i+1] = phi.mcmc[i]
+    theta.mcmc[i+1] = theta.mcmc[i]
+    sigma.mcmc[i+1] = sigma.mcmc[i]
+    beta.mcmc[i+1,] = beta.mcmc[i,]
+  }
+  if (i %% 20 == 0) print(i)
+}
+
+par(mfrow=c(2,2))
+plot(exp(phi.mcmc), type="l")
+plot(1/(1+exp(-theta.mcmc)), type="l")
+plot(sigma.mcmc, type="l")
+plot(beta.mcmc[,1], type="l")
+var(cbind(theta.mcmc, phi.mcmc))
+accepted/n.iter
+```
+
+
+```{r}
+samples = cbind(beta.mcmc[101:1100,],
+                sigma.mcmc[101:1100],
+                1/(1+exp(-theta.mcmc))[101:1100],
+                exp(phi.mcmc)[101:1100])
+colnames(samples) = c("beta0", "beta1", "beta2", "beta3", "beta4", "beta5",
+                      "sigma", "theta", "phi")
+write.csv(samples, "logit_mcmc_samples_lognormal1000.csv", row.names=F)
+mcmc = read.csv("logit_mcmc_samples_lognormal1000.csv")
+```
+
+```{r}
+# reps = dim(mcmc)[1]
+# W = matrix(0, nrow=n, ncol=reps)
+# for (i in 1:reps) {
+#   rho.mat = varcov.spatial(in_geor_jitter$coords, cov.pars=c(1, mcmc$phi[i]), nugget=0, kappa=0.5)
+#   rho = rho.mat$varcov
+#   I = diag(n)
+#   V = mcmc$theta[i]*rho + (1-mcmc$theta[i])*I
+#   C = mcmc$sigma[i]*V
+#   DB = D %*% t(mcmc[i,1:6])
+#   W[,i] = rmvnorm(1, DB, C)
+# }
+# write.csv(W, "posterior_predictive_samples.csv", row.names=F)
+```
+
+```{r}
+optim.MAP = optim(c(0.2,1), function(x) thetaphi.post(x[1],x[2])$logdensity, control=list(fnscale=-1))
+transformed.MAP = optim.MAP$par
+theta.MAP = 1/(1+exp(-transformed.MAP[1]))
+phi.MAP = exp(transformed.MAP[2])
+```
+
+
+```{r}
+reps = dim(mcmc)[1]
+reps = 100
+W0 = matrix(0, nrow=n, ncol=reps)
+for (i in 1:reps) {
+  rho.mat = varcov.spatial(in_geor_jitter$coords, cov.pars=c(1, mcmc$phi[i]), nugget=0, kappa=0.5)
+  rho = rho.mat$varcov
+  I = diag(n)
+  V = mcmc$theta[i]*rho + (1-mcmc$theta[i])*I
+  C = mcmc$sigma[i]*V
+  L = t(chol(C))
+  L.inv = forwardsolve(L, I)
+  C.inv = t(L.inv) %*% L.inv
+  R = mcmc$theta[i]*mcmc$sigma[i] * rho
+  cond.mean = D %*% t(mcmc[i,1:6]) + t(rho) %*% C.inv %*% (logit(Y) - D %*% t(mcmc[i,1:6]))
+  cond.var = R - R %*% C.inv %*% t(R)
+  W0[,i] = rmvnorm(1, cond.mean, cond.var)
+  if (i %% 20 == 0) print(i)
+}
+#write.csv(W0, "conditional_samples.csv", row.names=F)
+```
+```{r}
+x = soil$longitude.1
+y = soil$latitude.1
+z = Y
+borders = us_map(include = c("ND", "SD", "MN"))
+rbPal <- colorRampPalette(c('black','red'))
+z.col = rbPal(10)[as.numeric(cut(z,breaks = 10))]
+par(mar=c(1,2,0,1))
+s = scatterplot3d(borders$x, borders$y, rep(0,length(borders$x)), 
+                  type="l", box=F, axis=T, grid=F, color=4, angle=65,
+                  zlim=c(0,1),
+                  x.ticklabs="", y.ticklabs="",
+                  xlab="", ylab="", zlab="logit(Moisture)")
+s$points3d(x,y,z, type="h", pch=16, col=z.col)
+
+x = soil$longitude.1
+y = soil$latitude.1
+z = post.pred.mean.unscaled
+z = rowMeans(1/(1+exp(-(W0))))
+borders = us_map(include = c("ND", "SD", "MN"))
+# https://stackoverflow.com/questions/9946630/colour-points-in-a-plot-differently-depending-on-a-vector-of-values
+rbPal <- colorRampPalette(c('black','red'))
+z.col = rbPal(10)[as.numeric(cut(z,breaks = 10))]
+par(mar=c(1,2,0,1))
+s = scatterplot3d(borders$x, borders$y, rep(0,length(borders$x)), 
+                  type="l", box=F, axis=T, grid=F,
+                  zlim=c(0,1), color=4, angle=65,
+                  x.ticklabs="", y.ticklabs="",
+                  xlab="", ylab="", zlab="Moisture (%)")
+s$points3d(x,y,z, type="h", pch=16, col=z.col)
+title("Soil Moisture in the Dakota-Minnesota region", line=-1)
+```
+$$
+\begin{aligned}
+L(\beta, \sigma^2, \tau^2, \phi|\boldsymbol{x}) 
+&\propto \det(\sigma^2 \rho(\phi) + \tau^2I)^{-1/2} \exp\left\{-\frac{1}{2}(X-D\beta)^T(\sigma^2 \rho(\phi) + \tau^2I)^{-1}(X-D\beta)\right\} \\
+L(\beta, \sigma^2, \theta, \phi|\boldsymbol{x}) 
+&\propto \det(\theta\rho(\phi) + (1-\theta)I)^{-1/2} (\sigma^2)^{-m/2} \exp\left\{-\frac{1}{2\sigma^2}(X-D\beta)^T(\theta\rho(\phi) + (1-\theta)I)^{-1}(X-D\beta)\right\} \\
+&\propto \det(V(\theta, \phi))^{-1/2} \exp\left\{-\frac{1}{2\sigma^2}\left[(\beta-\hat{\beta})^TD^T V(\theta, \phi)^{-1} D (\beta-\hat{\beta}) + S^2(\phi)\right]\right\} \\
+\end{aligned}
+$$
+
+where
+
+$$
+\begin{aligned}
+D^TV(\theta, \phi)^{-1}D\hat{\beta} &= D^TV(\theta, \phi)^{-1}X\\
+S^2(\theta, \phi) &= (X-D\hat{\beta})^T V(\theta, \phi)^{-1}(X-D\hat{\beta})\\
+\end{aligned}
+$$
+
+$$
+C(\sigma^2,\phi,\tau^2) = \sigma^2\rho(\phi) + \tau^2I \\
+\theta = \frac{\sigma^2}{\tau^2+\sigma^2}\\
+C(\sigma^2,\phi,\theta) = \sigma^2(\theta\rho(\phi) + (1-\theta)I) \\
+C(\sigma^2,\phi,\theta) = \sigma^2V(\theta, \phi) 
+$$
+
+
+$$
+\begin{aligned}
+p(\beta, \sigma^2, \theta, \phi) &= p(\beta, \sigma^2|  \theta, \phi) p(\theta, \phi) \\
+p(\beta, \sigma^2, \theta, \phi) &= IG(\sigma^2 \mid a,b) p(\theta, \phi) \\
+p(\beta, \sigma^2, \theta, \phi| \boldsymbol{x}) &\propto f(\boldsymbol{x} | \beta, \sigma^2, \theta, \phi) p(\beta, \sigma^2, \theta, \phi) \\
+&\propto |V(\theta, \phi)|^{-1/2} \exp\left\{-\frac{1}{2\sigma^2}\left[(\beta-\hat{\beta})^TD^T V(\theta, \phi)^{-1} D (\beta-\hat{\beta}) + S^2(\theta, \phi)\right]\right\} \\
+&\phantom{\propto} (\sigma^2)^{-\frac{m-k}{2}-a-1} \exp\left\{-\frac{b}{\sigma^2}\right\}
+ p(\theta, \phi)\\
+p(\sigma^2, \theta, \phi| \boldsymbol{x}) 
+&\propto |V(\theta, \phi)|^{-1/2} |D^TV(\theta, \phi)^{-1}D|^{-1/2} \exp\left\{- \frac{1}{2\sigma^2} S^2(\theta, \phi)\right\}\\
+&\phantom{\propto} (\sigma^2)^{-\frac{m-k}{2}-a-1} \exp\left\{-\frac{b}{\sigma^2}\right\}  p(\theta, \phi) \\
+p(\theta, \phi| \boldsymbol{x}) 
+&\propto |V(\theta, \phi)|^{-1/2} |D^TV(\theta, \phi)^{-1}D|^{-1/2} (S(\theta, \phi)+2b)^{-\frac{m-k}{2}-a} p(\theta, \phi)
+\end{aligned}
+$$
+$$
+\begin{aligned}
+p(\beta | \sigma^2, \tau^2, \phi, \boldsymbol{x}) 
+&\propto \exp\left\{-\frac{1}{2\sigma^2}(\beta-\hat{\beta})^TD^T V(\theta, \phi)^{-1} D (\beta-\hat{\beta})\right\} \\
+p(\sigma^2 | \theta, \phi, \boldsymbol{x}) 
+&= (\sigma^2)^{-\frac{m-k}{2}-a-1} \exp\left\{-\frac{S^2(\theta, \phi) +2b}{2\sigma^2}\right\} \\
+p(\theta, \phi| \boldsymbol{x}) 
+&\propto |V(\theta, \phi)|^{-1/2} |D^TV(\theta, \phi)^{-1}D|^{-1/2}  (S^2(\theta, \phi)+2b)^{-\frac{m-k}{2}-a} p(\theta,\phi)
+\end{aligned}
+$$
